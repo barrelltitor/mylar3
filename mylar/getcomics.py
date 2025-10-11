@@ -31,6 +31,7 @@ import json
 import mylar
 from operator import itemgetter
 from mylar import db, logger, helpers, search_filer
+from mylar.downloaders.jdownloader2 import JDownloader2
 
 class GC(object):
 
@@ -158,6 +159,15 @@ class GC(object):
         self.pack_receipts = ['+ TPBs', '+TPBs', '+ TPB', '+TPB', 'TPB', '+ Deluxe Books', '+ Annuals', '+Annuals', ' & ']
 
         self.provider_stat = provider_stat
+
+        self.jd2 = None
+        if mylar.CONFIG.JD2_ENABLE and mylar.CONFIG.JD2_URL:
+            try:
+                self.jd2 = JDownloader2(base_url=mylar.CONFIG.JD2_URL)
+                logger.fdebug('[JD2] Initialized JD2 helper in GetComics.')
+            except Exception as err:
+                logger.warn('[JD2] Unable to initialize helper: %s', err)
+                self.jd2 = None
 
     def search(self,is_info=None):
 
@@ -1099,26 +1109,77 @@ class GC(object):
                 # (it will get renamed upon completion anyways)
                 #tmp_filename = comicinfo[0]['nzbtitle']
 
-            mylar.DDL_QUEUE.put(
-                {
-                    'link': x['links'],
-                    'mainlink': mainlink,
-                    'series': x['series'],
-                    'year': x['year'],
-                    'size': x['size'],
-                    'comicid': self.comicid,
-                    'issueid': self.issueid,
-                    'oneoff': self.oneoff,
-                    'id': mod_id,
-                    'link_type': link_type,
-                    'filename': tmp_filename,
-                    'comicinfo': comicinfo,
-                    'packinfo': packinfo,
-                    'site': 'DDL(GetComics)',
-                    'remote_filesize': 0,
-                    'resume': None,
-                }
-            )
+            queue_payload = {
+                'link': x['links'],
+                'mainlink': mainlink,
+                'series': x['series'],
+                'year': x['year'],
+                'size': x['size'],
+                'comicid': self.comicid,
+                'issueid': self.issueid,
+                'oneoff': self.oneoff,
+                'id': mod_id,
+                'link_type': link_type,
+                'filename': tmp_filename,
+                'comicinfo': comicinfo,
+                'packinfo': packinfo,
+                'site': 'DDL(GetComics)',
+                'remote_filesize': 0,
+                'resume': None,
+            }
+
+            if self.jd2 is not None:
+                package_name = '%s (%s) - %s' % (series, year, mod_id)
+                logger.info('[JD2] Submitting %s to JD2: %s', package_name, queue_payload['link'])
+                jd2_links = []
+
+                primary_link = queue_payload['link']
+                if isinstance(primary_link, str) and primary_link not in jd2_links:
+                    jd2_links.append(primary_link)
+
+                current_link = x.get('links')
+                if isinstance(current_link, str) and current_link not in jd2_links:
+                    jd2_links.append(current_link)
+
+                if isinstance(links, list):
+                    for entry in links:
+                        if isinstance(entry, dict):
+                            url = entry.get('links')
+                        else:
+                            url = entry
+                        if isinstance(url, str) and url not in jd2_links:
+                            jd2_links.append(url)
+
+                if isinstance(tmp_links, list):
+                    for entry in tmp_links:
+                        if isinstance(entry, dict):
+                            url = entry.get('links')
+                        else:
+                            url = entry
+                        if isinstance(url, str) and url not in jd2_links:
+                            jd2_links.append(url)
+
+                jd2_linkset = ','.join(jd2_links)
+                submit_result = self.jd2.submit(jd2_linkset, package_name, record_id=mod_id)
+                if not submit_result.get('status'):
+                    logger.warn('[JD2] Submission failed for %s; falling back to internal queue. Details: %s', package_name, submit_result)
+                    mylar.DDL_QUEUE.put(queue_payload)
+                else:
+                    logger.info('[JD2] Submission response for %s: %s', package_name, submit_result)
+                    job_id = submit_result.get('jobid')
+                    if job_id:
+                        jd2_queue_payload = dict(queue_payload)
+                        jd2_queue_payload.update({
+                            'job_id': job_id,
+                        })
+                        try:
+                            mylar.JD2_QUEUE.put(jd2_queue_payload)
+                        except Exception as err:
+                            logger.warn('[JD2] Unable to enqueue %s for monitoring: %s', package_name, err)
+                    else:
+                        logger.warn('[JD2] Submission for %s returned no job id; JD2 monitoring unavailable.', package_name)
+            else:
+                mylar.DDL_QUEUE.put(queue_payload)
             cnt += 1
 
         return {'success': True, 'site': link_type}
