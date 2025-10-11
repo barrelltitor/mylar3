@@ -89,7 +89,7 @@ class ComicVineTalker(QObject):
     def __init__(self):
         QObject.__init__(self)
 
-        if any(ComicVineTalker.api_base_url == "" or ComicVineTalker.api_base_url == ""):
+        if any(ComicVineTalker.api_base_url == "" or ComicVineTalker.api_base_url is None):
             self.api_base_url = "https://comicvine.gamespot.com/api"
         else:
             self.api_base_url = ComicVineTalker.api_base_url.strip().rstrip('/')
